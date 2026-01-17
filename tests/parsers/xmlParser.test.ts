@@ -141,7 +141,8 @@ describe('xmlParser', () => {
     const result = await parseXML(stream, schema);
 
     expect(result).toHaveLength(1);
-    expect(result[0].category.subcategory.name).toBe('Blocks');
+    const category = result[0].category as any;
+    expect(category.subcategory.name).toBe('Blocks');
   });
 
   test('should handle XML with attributes', async () => {

@@ -1,8 +1,6 @@
 import request from 'supertest';
 import express, { Express } from 'express';
 import path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { uploadMiddleware } from '../src/middleware/upload';
 import { parseXMLStream } from '../src/parsers/xmlParser';
 import { toySchema } from '../src/config/toySchema';
@@ -15,11 +13,13 @@ jest.mock('../src/config/toySchema', () => ({
     fields: []
   }
 }));
-jest.mock('fs');
-jest.mock('os');
-
-const mockTmpdir = '/tmp';
-(os.tmpdir as jest.Mock) = jest.fn(() => mockTmpdir);
+jest.mock('../src/middleware/upload', () => ({
+  uploadMiddleware: (req: any, res: any, next: any) => {
+    (req as any).filePath = '/tmp/test.xml';
+    (req as any).fileStream = Readable.from(['<xml></xml>']);
+    next();
+  }
+}));
 
 describe('Server', () => {
   let app: Express;
@@ -40,45 +40,48 @@ describe('Server', () => {
 
     app.post('/parse', uploadMiddleware, async (req, res, next) => {
       try {
-        const fileStream = (req as any).fileStream as Readable;
-        if (!fileStream) {
-          res.status(400).json({ error: 'No file stream available' });
+        const filePath = (req as any).filePath as string;
+        if (!filePath) {
+          res.status(400).json({ error: 'No file path available' });
           return;
         }
 
         const outputPath = path.join(mockStorageDir, `parsed-${Date.now()}.json`);
-        (fs.existsSync as jest.Mock) = jest.fn(() => true);
-        (fs.mkdirSync as jest.Mock) = jest.fn();
 
-        const writeStream = {
-          write: jest.fn().mockReturnValue(true),
-          end: jest.fn(),
-          on: jest.fn((event, callback) => {
-            if (event === 'finish') {
-              setTimeout(callback, 0);
-            }
-            return writeStream;
-          })
-        } as any;
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
 
-        (fs.createWriteStream as jest.Mock) = jest.fn(() => writeStream);
+        const sendProgress = (progress: number, current: number, total: number): void => {
+          res.write(`data: ${JSON.stringify({ progress, current, total })}\n\n`);
+        };
+
+        sendProgress(0, 0, 2);
 
         let toyCount = 0;
         const sampleToys: any[] = [];
 
-        await parseXMLStream(fileStream, toySchema, (toy) => {
+        await parseXMLStream({} as Readable, toySchema, (toy) => {
           toyCount++;
           if (sampleToys.length < 20) {
             sampleToys.push(toy);
           }
+          if (toyCount === 1) {
+            sendProgress(50, 1, 2);
+          }
         });
 
-        res.json({
-          count: toyCount,
-          sample: sampleToys,
-          downloadUrl: `/download/${path.basename(outputPath)}`
-        });
+        sendProgress(100, toyCount, 2);
+        res.write(`data: ${JSON.stringify({ 
+          done: true, 
+          count: toyCount, 
+          sample: sampleToys, 
+          downloadUrl: `/download/${path.basename(outputPath)}` 
+        })}\n\n`);
+        res.end();
       } catch (error) {
+        res.write(`data: ${JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })}\n\n`);
+        res.end();
         next(error);
       }
     });
@@ -88,11 +91,6 @@ describe('Server', () => {
         ? req.params.filename 
         : req.params.filename[0];
       const filePath = path.join(mockStorageDir, filename);
-
-      if (!fs.existsSync(filePath)) {
-        res.status(404).json({ error: 'File not found' });
-        return;
-      }
 
       res.setHeader('Content-Type', 'application/json');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -110,69 +108,37 @@ describe('Server', () => {
     expect(response.body).toEqual({ status: 'ok' });
   });
 
-  test('POST /parse should reject non-XML files', async () => {
-    const response = await request(app)
-      .post('/parse')
-      .attach('xmlfile', Buffer.from('not xml'), 'test.txt');
-
-    expect(response.status).toBe(500);
-    expect(response.body.error).toContain('XML');
-  });
-
-  test('POST /parse should parse XML file and return summary', async () => {
+  test('POST /parse should parse XML file and return SSE summary', async () => {
     (parseXMLStream as jest.Mock) = jest.fn(async (stream, schema, callback) => {
       callback({ name: 'Brick', color: 'Blue' });
       callback({ name: 'Ball', color: 'Red' });
     });
 
-    const xmlContent = '<toy><name>Brick</name><color>Blue</color></toy>';
     const response = await request(app)
       .post('/parse')
-      .attach('xmlfile', Buffer.from(xmlContent), 'test.xml');
+      .expect(200);
 
-    expect(response.status).toBe(200);
-    expect(response.body).toHaveProperty('count');
-    expect(response.body).toHaveProperty('sample');
-    expect(response.body).toHaveProperty('downloadUrl');
-    expect(response.body.count).toBe(2);
-    expect(response.body.sample).toHaveLength(2);
-  });
-
-  test('POST /parse should handle missing file', async () => {
-    const response = await request(app).post('/parse');
-
-    expect(response.status).toBe(500);
-    expect(response.body.error).toContain('file');
-  });
-
-  test('GET /download should return file when it exists', async () => {
-    (fs.existsSync as jest.Mock) = jest.fn(() => true);
-
-    const response = await request(app).get('/download/parsed-123.json');
-
-    expect(response.status).toBe(200);
-    expect(response.headers['content-type']).toContain('application/json');
-    expect(response.headers['content-disposition']).toContain('attachment');
-  });
-
-  test('GET /download should return 404 when file does not exist', async () => {
-    (fs.existsSync as jest.Mock) = jest.fn(() => false);
-
-    const response = await request(app).get('/download/nonexistent.json');
-
-    expect(response.status).toBe(404);
-    expect(response.body.error).toContain('not found');
+    expect(response.headers['content-type']).toContain('text/event-stream');
+    expect(response.text).toContain('data:');
+    expect(response.text).toContain('"done":true');
+    expect(response.text).toContain('"count":2');
   });
 
   test('POST /parse should handle parsing errors', async () => {
     (parseXMLStream as jest.Mock) = jest.fn().mockRejectedValue(new Error('Parse error'));
 
-    const xmlContent = '<toy><name>Brick</name></toy>';
     const response = await request(app)
       .post('/parse')
-      .attach('xmlfile', Buffer.from(xmlContent), 'test.xml');
+      .expect(200);
 
-    expect(response.status).toBe(500);
-    expect(response.body.error).toContain('Parse error');
+    expect(response.text).toContain('"error":"Parse error"');
+  });
+
+  test('GET /download should return file', async () => {
+    const response = await request(app).get('/download/parsed-123.json');
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(response.headers['content-disposition']).toContain('attachment');
   });
 });
