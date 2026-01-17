@@ -5,12 +5,13 @@ import { parseXMLStream } from './parsers/xmlParser';
 import { toySchema } from './config/toySchema';
 import { Readable } from 'stream';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as sax from 'sax';
+import { getClient, insertToysBatch, closePool } from './db/postgres';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage');
+const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '1000', 10);
+const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true, set to 'false' to disable
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -76,15 +77,12 @@ app.get('/', (req: Request, res: Response): void => {
 app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const filePath = (req as any).filePath as string;
   let fileStream: Readable | undefined;
-  
-  if (!fs.existsSync(STORAGE_DIR)) {
-    fs.mkdirSync(STORAGE_DIR, { recursive: true });
-  }
-  
-  const outputPath = path.join(STORAGE_DIR, `parsed-${Date.now()}-${Math.round(Math.random() * 1E9)}.json`);
+  // @ts-ignore
+  let dbClient = null;
+  const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
 
   console.log(`[Upload] File saved to: ${filePath}`);
-  console.log(`[Parse] Output will be saved to: ${outputPath}`);
+  console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
 
   try {
     // Count first-level toy elements
@@ -111,48 +109,44 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     // Send initial progress with total count
     sendProgress(0, 0, firstLevelToyCount);
 
-    const writeStream = fs.createWriteStream(outputPath, { highWaterMark: 16 * 1024 });
-    writeStream.write('{"toys":[');
+    // Get database client and start transaction (if database is enabled)
+    if (USE_DATABASE) {
+      try {
+        dbClient = await getClient();
+        await dbClient.query('BEGIN');
+      } catch (dbError) {
+        console.warn('[Parse] Database connection failed, continuing without database:', dbError);
+        // Continue without database for local testing
+      }
+    }
 
-    let isFirst = true;
     let toyCount = 0;
     const sampleToys: any[] = [];
-    let pendingWrites: Promise<void>[] = [];
-    let isDraining = false;
+    let batch: any[] = [];
     let lastProgressSent = -1;
+    let lastBatchInsertTime = Date.now();
 
-    const queueWrite = (data: string): void => {
-      if (writeStream.write(data)) {
-        return;
-      }
-      
-      if (!isDraining) {
-        isDraining = true;
-        const promise = new Promise<void>((resolve) => {
-          writeStream.once('drain', () => {
-            isDraining = false;
-            resolve();
-          });
-        });
-        pendingWrites.push(promise);
-      }
-    };
-
-    await parseXMLStream(fileStream, toySchema, (toy) => {
+    await parseXMLStream(fileStream, toySchema, async (toy) => {
       toyCount++;
-      
-      if (!isFirst) {
-        queueWrite(',');
-      } else {
-        isFirst = false;
-      }
-      
-      const toyJson = JSON.stringify(toy);
-      queueWrite(toyJson);
+      batch.push(toy);
 
+      // Collect sample toys
       if (sampleToys.length < 20) {
         const toyCopy = JSON.parse(JSON.stringify(toy));
         sampleToys.push(toyCopy);
+      }
+
+      // Insert batch when it reaches the batch size (if database is enabled)
+      // @ts-ignore
+      if (USE_DATABASE && dbClient && batch.length >= BATCH_SIZE) {
+        try {
+          await insertToysBatch(dbClient, batch, batchId);
+          batch = [];
+          lastBatchInsertTime = Date.now();
+        } catch (dbError) {
+          console.error('[Parse] Database insert error:', dbError);
+          // Continue parsing even if database insert fails
+        }
       }
 
       // Calculate and send progress updates
@@ -178,67 +172,71 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
       }
     });
 
-    if (pendingWrites.length > 0) {
-      await Promise.all(pendingWrites);
+    // Insert remaining toys in batch (if database is enabled)
+    if (USE_DATABASE && dbClient && batch.length > 0) {
+      try {
+        await insertToysBatch(dbClient, batch, batchId);
+      } catch (dbError) {
+        console.error('[Parse] Database insert error:', dbError);
+      }
     }
 
-    writeStream.write(']}');
-    writeStream.end();
-
-    await new Promise<void>((resolve, reject) => {
-      writeStream.on('finish', () => resolve());
-      writeStream.on('error', reject);
-    });
+    // Commit transaction (if database is enabled)
+    if (USE_DATABASE && dbClient) {
+      try {
+        await dbClient.query('COMMIT');
+        console.log(`[Parse] Successfully inserted ${toyCount.toLocaleString()} toys into database`);
+      } catch (dbError) {
+        console.error('[Parse] Database commit error:', dbError);
+        try {
+          await dbClient.query('ROLLBACK');
+        } catch (rollbackError) {
+          console.error('[Parse] Error during rollback:', rollbackError);
+        }
+      }
+    } else {
+      console.log(`[Parse] Parsed ${toyCount.toLocaleString()} toys (database disabled)`);
+    }
 
     // Send final progress and result
     sendProgress(100, toyCount, firstLevelToyCount);
     res.write(`data: ${JSON.stringify({ 
       done: true, 
       count: toyCount, 
-      sample: sampleToys, 
-      downloadUrl: `/download/${path.basename(outputPath)}` 
+      sample: sampleToys
     })}\n\n`);
     res.end();
-
-    (req as any).outputPath = outputPath;
   } catch (error) {
-    if (fs.existsSync(outputPath)) {
-      fs.unlinkSync(outputPath);
+    // Rollback transaction on error (if database is enabled)
+    if (USE_DATABASE && dbClient) {
+      try {
+        await dbClient.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('[Parse] Error during rollback:', rollbackError);
+      }
     }
+    
     // Send error via SSE before ending
-    res.write(`data: ${JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })}\n\n`);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[Parse] Error:', errorMessage);
+    res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
     res.end();
     next(error);
   } finally {
+    // Release database client
+    if (dbClient) {
+      dbClient.release();
+    }
+    
+    // Clean up temporary file
     if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+      try {
+        fs.unlinkSync(filePath);
+      } catch (unlinkError) {
+        console.error('[Parse] Error deleting temp file:', unlinkError);
+      }
     }
   }
-});
-
-app.get('/download/:filename', (req: Request, res: Response, next: NextFunction): void => {
-  const filenameParam = req.params.filename;
-  const filename = typeof filenameParam === 'string' ? filenameParam : filenameParam[0];
-  const filePath = path.join(STORAGE_DIR, filename);
-
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: 'File not found' });
-    return;
-  }
-
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  
-  const fileStream = fs.createReadStream(filePath);
-  fileStream.pipe(res);
-
-  fileStream.on('end', () => {
-    fs.unlinkSync(filePath);
-  });
-
-  fileStream.on('error', (err) => {
-    next(err);
-  });
 });
 
 app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
@@ -246,6 +244,28 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing database pool...');
+  if (USE_DATABASE) {
+    await closePool();
+  }
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, closing database pool...');
+  if (USE_DATABASE) {
+    await closePool();
+  }
+  process.exit(0);
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  if (USE_DATABASE) {
+    console.log(`Database mode: ENABLED`);
+  } else {
+    console.log(`Database mode: DISABLED (local testing mode)`);
+  }
 });

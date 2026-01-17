@@ -13,7 +13,6 @@ interface ParseResult {
   done: boolean;
   count: number;
   sample: any[];
-  downloadUrl?: string;
 }
 
 /**

@@ -6,7 +6,7 @@ This directory contains alternate implementations and examples of the XML parser
 
 ### React Component (`react/`)
 
-A React component that replicates the functionality of `src/public/index.html`. This component can be easily integrated into any React application.
+A React component that replicates the functionality of `src/public/index.html`. This component is designed for production use where parsed data is stored in PostgreSQL rather than downloaded as files.
 
 **Files:**
 - `XmlParser.tsx` - Main React component
@@ -24,6 +24,15 @@ function App() {
 }
 ```
 
+### Kubernetes Deployment Guide (`KUBERNETES-DEPLOYMENT.md`)
+
+Comprehensive guide for deploying the XML parser with PostgreSQL in Kubernetes, including:
+- Database setup and configuration
+- Kubernetes deployment manifests
+- Environment variables and resource recommendations
+- Scaling and monitoring considerations
+- Security best practices
+
 ## Purpose
 
 The alternates directory is intended to provide:
@@ -31,6 +40,16 @@ The alternates directory is intended to provide:
 - Alternative UI approaches
 - Integration examples for different use cases
 - Reusable components that can be dropped into existing projects
+- Production deployment guides
+
+## Architecture Notes
+
+**Production Configuration:**
+- Data is stored directly in PostgreSQL database
+- No file storage or download functionality
+- Stateless application pods for horizontal scaling
+- Connection pooling for efficient database access
+- Batch inserts for optimal performance
 
 ## Contributing
 
@@ -39,3 +58,4 @@ When adding new alternates:
 2. Include a README.md explaining usage
 3. Provide example code showing integration
 4. Keep the API consistent with the backend (`/parse` endpoint)
+5. Note whether it's for file-based or database-based storage

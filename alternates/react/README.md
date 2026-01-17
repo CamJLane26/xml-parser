@@ -88,7 +88,7 @@ Then override styles in your CSS:
 - Progress bar with percentage and count
 - Summary display with total count
 - Sample results preview (first 20 items)
-- Download full results as JSON
+- Data automatically saved to PostgreSQL database
 - Error handling
 - Reset functionality to parse another file
 
@@ -110,7 +110,10 @@ The component expects the backend to:
   ```
 - Send a final message when done:
   ```
-  data: {"done": true, "count": 2000, "sample": [...], "downloadUrl": "/download/..."}
+  data: {"done": true, "count": 2000, "sample": [...]}
   ```
+- Store parsed data in PostgreSQL database (no file download needed)
 
 See `src/server.ts` for the backend implementation.
+
+**Note**: This component is designed for production use where parsed data is stored in a PostgreSQL database rather than being downloaded as JSON files.

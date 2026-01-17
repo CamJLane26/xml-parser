@@ -10,7 +10,6 @@ interface ParseResult {
   done: boolean;
   count: number;
   sample: any[];
-  downloadUrl?: string;
 }
 
 interface XmlParserProps {
@@ -130,12 +129,6 @@ export const XmlParser: React.FC<XmlParserProps> = ({
     }
   }, [file, apiBaseUrl, onParseComplete, onError]);
 
-  const handleDownload = useCallback(() => {
-    if (result?.downloadUrl) {
-      window.location.href = `${apiBaseUrl}${result.downloadUrl}`;
-    }
-  }, [result, apiBaseUrl]);
-
   const handleReset = useCallback(() => {
     setFile(null);
     setResult(null);
@@ -210,11 +203,9 @@ export const XmlParser: React.FC<XmlParserProps> = ({
           </div>
           <h3>Sample Results (first 20 toys):</h3>
           <pre>{JSON.stringify({ toys: result.sample }, null, 2)}</pre>
-          {result.count > result.sample.length && result.downloadUrl && (
-            <button className="download-btn" onClick={handleDownload}>
-              Download Full Results (JSON)
-            </button>
-          )}
+          <p style={{ marginTop: '15px', padding: '10px', background: '#e8f5e9', borderRadius: '4px' }}>
+            ✓ All {result.count.toLocaleString()} toys have been saved to the database.
+          </p>
           <button className="reset-btn" onClick={handleReset} style={{ marginTop: '10px' }}>
             Parse Another File
           </button>
