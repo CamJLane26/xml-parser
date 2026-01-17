@@ -126,6 +126,107 @@ Unit tests are provided alongside the source code. Run tests with:
 npm test
 ```
 
+## Environment Variables
+
+- `PORT` - Server port (default: 3000)
+- `STORAGE_DIR` - Directory for temporary file storage (default: `./storage` in project root)
+  - For Kubernetes: Set to a persistent volume mount path (e.g., `/data/storage`)
+  - Files are automatically cleaned up after processing/download
+- `NODE_HEAP_SIZE` - Node.js heap size in MB (default: 4096 = 4GB)
+  - Should be set to ~50-70% of available container memory
+  - Example: For 8GB container, use `NODE_HEAP_SIZE=5120` (5GB)
+  - Leave room for OS, Node.js overhead, and other processes
+
+## Kubernetes Deployment
+
+For Kubernetes/Rancher deployments:
+
+1. **Persistent Volume**: Mount a persistent volume to `/data/storage` (or your preferred path)
+2. **Environment Variables**: 
+   ```yaml
+   env:
+     - name: PORT
+       value: "3000"
+     - name: STORAGE_DIR
+       value: "/data/storage"
+     - name: NODE_HEAP_SIZE
+       value: "5120"  # 5GB for 8GB container (adjust based on available RAM)
+   ```
+3. **Resource Limits**: Set appropriate memory limits in your Kubernetes deployment
+   - Recommended: Set memory limit to at least 1.5x the heap size
+   - Example: For `NODE_HEAP_SIZE=5120`, set memory limit to 8GB
+
+### PersistentVolumeClaim
+
+Create a PersistentVolumeClaim to ensure storage is available:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xml-parser-storage
+  namespace: default  # Change to your namespace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi  # Adjust size based on your needs
+  storageClassName: standard  # Change to your storage class
+```
+
+Apply it with:
+```bash
+kubectl apply -f pvc.yaml
+```
+
+### Deployment Example
+
+Example deployment snippet:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xml-parser
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: xml-parser
+  template:
+    metadata:
+      labels:
+        app: xml-parser
+    spec:
+      containers:
+      - name: xml-parser
+        image: your-registry/xml-parser:latest
+        env:
+          - name: PORT
+            value: "3000"
+          - name: STORAGE_DIR
+            value: "/data/storage"
+          - name: NODE_HEAP_SIZE
+            value: "5120"
+        volumeMounts:
+          - name: storage-volume
+            mountPath: /data/storage
+        resources:
+          limits:
+            memory: "8Gi"      # Total container memory limit
+          requests:
+            memory: "6Gi"      # Memory requested for scheduling
+      volumes:
+        - name: storage-volume
+          persistentVolumeClaim:
+            claimName: xml-parser-storage
+```
+
+**Note**: 
+- `volumeMounts` - Mounts the persistent volume for file storage
+- `resources` - Sets CPU/memory limits for the container itself (not related to the volume)
+- `volumes` - References the PersistentVolumeClaim created above
+
 ## License
 
 ISC

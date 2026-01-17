@@ -138,6 +138,7 @@ export function parseXMLStream(
         if (parsed) {
           onToy(parsed);
         }
+        clearElementTree(rootElement);
         rootElement = undefined;
       }
 
@@ -146,6 +147,10 @@ export function parseXMLStream(
       } else {
         currentElement = undefined;
       }
+    });
+
+    stream.on('error', (err: Error) => {
+      parser.emit('error', err);
     });
 
     parser.on('error', (err: Error) => {
@@ -218,4 +223,16 @@ function extractField(element: ElementContext, field: FieldSchema): ParsedValue 
   }
 
   return undefined;
+}
+
+function clearElementTree(element: ElementContext): void {
+  if (element.children) {
+    for (const childrenArray of element.children.values()) {
+      for (const child of childrenArray) {
+        clearElementTree(child);
+      }
+    }
+    element.children.clear();
+  }
+  element.parent = undefined;
 }

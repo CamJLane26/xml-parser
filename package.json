@@ -4,9 +4,10 @@
   "description": "Express microservice for parsing XML files with streaming support",
   "main": "build/server.js",
   "scripts": {
-    "build": "tsc",
-    "start": "node build/server.js",
-    "dev": "ts-node src/server.ts",
+    "build": "tsc && npm run copy-assets",
+    "copy-assets": "mkdir -p build/public && cp -r src/public/* build/public/",
+    "start": "node --max-old-space-size=${NODE_HEAP_SIZE:-4096} --expose-gc build/server.js",
+    "dev": "node --max-old-space-size=${NODE_HEAP_SIZE:-4096} --expose-gc -r ts-node/register src/server.ts",
     "test": "jest",
     "test:watch": "jest --watch",
     "generate-xml": "ts-node sandbox/generateXml.ts"

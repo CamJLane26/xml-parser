@@ -1,12 +1,19 @@
 import multer from 'multer';
 import { Request, Response, NextFunction } from 'express';
-import { createReadStream } from 'fs';
+import { createReadStream, existsSync, mkdirSync } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+
+const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage');
+
+if (!fs.existsSync(STORAGE_DIR)) {
+  fs.mkdirSync(STORAGE_DIR, { recursive: true });
+}
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, os.tmpdir());
+    cb(null, STORAGE_DIR);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
