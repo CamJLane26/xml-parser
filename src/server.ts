@@ -98,6 +98,19 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
       return;
     }
 
+    // Set up Server-Sent Events for progress updates
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+
+    const sendProgress = (progress: number, current: number, total: number): void => {
+      res.write(`data: ${JSON.stringify({ progress, current, total })}\n\n`);
+    };
+
+    // Send initial progress with total count
+    sendProgress(0, 0, firstLevelToyCount);
+
     const writeStream = fs.createWriteStream(outputPath, { highWaterMark: 16 * 1024 });
     writeStream.write('{"toys":[');
 
@@ -106,6 +119,7 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     const sampleToys: any[] = [];
     let pendingWrites: Promise<void>[] = [];
     let isDraining = false;
+    let lastProgressSent = -1;
 
     const queueWrite = (data: string): void => {
       if (writeStream.write(data)) {
@@ -141,6 +155,21 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
         sampleToys.push(toyCopy);
       }
 
+      // Calculate and send progress updates
+      if (firstLevelToyCount > 0) {
+        const progressPercent = Math.min(100, Math.floor((toyCount / firstLevelToyCount) * 100));
+        // Send progress update when percentage changes or every 1000 toys
+        if (progressPercent !== lastProgressSent || toyCount % 1000 === 0) {
+          sendProgress(progressPercent, toyCount, firstLevelToyCount);
+          lastProgressSent = progressPercent;
+        }
+      } else {
+        // If we don't know the total, still send updates periodically
+        if (toyCount % 1000 === 0) {
+          sendProgress(0, toyCount, 0);
+        }
+      }
+
       if (toyCount % 100000 === 0) {
         console.log(`[Parse] Processed ${toyCount.toLocaleString()} toys...`);
         if (global.gc) {
@@ -161,17 +190,24 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
       writeStream.on('error', reject);
     });
 
-    res.json({
-      count: toyCount,
-      sample: sampleToys,
-      downloadUrl: `/download/${path.basename(outputPath)}`
-    });
+    // Send final progress and result
+    sendProgress(100, toyCount, firstLevelToyCount);
+    res.write(`data: ${JSON.stringify({ 
+      done: true, 
+      count: toyCount, 
+      sample: sampleToys, 
+      downloadUrl: `/download/${path.basename(outputPath)}` 
+    })}\n\n`);
+    res.end();
 
     (req as any).outputPath = outputPath;
   } catch (error) {
     if (fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);
     }
+    // Send error via SSE before ending
+    res.write(`data: ${JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' })}\n\n`);
+    res.end();
     next(error);
   } finally {
     if (filePath && fs.existsSync(filePath)) {

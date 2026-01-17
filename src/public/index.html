@@ -123,10 +123,13 @@
       <button type="submit" id="submitBtn">Parse XML</button>
     </form>
     <div class="progress" id="progress">
+      <div id="totalCountInfo" style="margin-bottom: 10px; font-weight: bold; color: #1976d2; display: none;">
+        Total toys found: <span id="totalCount">0</span>
+      </div>
       <div class="progress-bar">
         <div class="progress-fill" id="progressFill"></div>
       </div>
-      <p>Uploading and parsing...</p>
+      <p id="progressText">Uploading and parsing...</p>
     </div>
     <div class="error" id="error"></div>
   </div>
@@ -146,6 +149,9 @@
     const submitBtn = document.getElementById('submitBtn');
     const progress = document.getElementById('progress');
     const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const totalCountInfo = document.getElementById('totalCountInfo');
+    const totalCount = document.getElementById('totalCount');
     const results = document.getElementById('results');
     const resultsContent = document.getElementById('resultsContent');
     const error = document.getElementById('error');
@@ -169,7 +175,9 @@
       progress.style.display = 'block';
       results.style.display = 'none';
       error.style.display = 'none';
-      progressFill.style.width = '50%';
+      totalCountInfo.style.display = 'none';
+      progressFill.style.width = '0%';
+      progressText.textContent = 'Uploading and parsing...';
 
       try {
         const response = await fetch('/parse', {
@@ -177,44 +185,88 @@
           body: formData
         });
 
-        progressFill.style.width = '75%';
-
         if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || 'Failed to parse XML');
+          throw new Error('Failed to parse XML');
         }
 
         if (!response.body) {
           throw new Error('No response body');
         }
 
-        progressFill.style.width = '90%';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalData = null;
 
-        const data = await response.json();
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) {
+            break;
+          }
 
-        progressFill.style.width = '100%';
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
-        const totalToys = data.count || 0;
-        const sampleToys = data.sample || [];
-        
-        toyCount.textContent = `Total toys parsed: ${totalToys.toLocaleString()}`;
-        
-        const sampleSize = sampleToys.length;
-        sampleInfo.textContent = totalToys > sampleSize
-          ? `Showing sample of ${sampleSize} toys (out of ${totalToys.toLocaleString()} total)`
-          : `Showing all ${totalToys.toLocaleString()} toys`;
-
-        const sampleData = { toys: sampleToys };
-        resultsContent.textContent = JSON.stringify(sampleData, null, 2);
-        
-        if (totalToys > sampleSize && data.downloadUrl) {
-          downloadBtn.style.display = 'block';
-          downloadBtn.onclick = () => {
-            window.location.href = data.downloadUrl;
-          };
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.error) {
+                  throw new Error(data.error);
+                }
+                
+                if (data.done) {
+                  finalData = data;
+                } else if (data.progress !== undefined) {
+                  // Show total count when we first receive it
+                  if (data.total > 0 && totalCountInfo.style.display === 'none') {
+                    totalCount.textContent = data.total.toLocaleString();
+                    totalCountInfo.style.display = 'block';
+                  }
+                  
+                  // Update progress bar
+                  const progressPercent = Math.min(100, Math.max(0, data.progress));
+                  progressFill.style.width = `${progressPercent}%`;
+                  
+                  if (data.total > 0) {
+                    progressText.textContent = `Parsing: ${data.current.toLocaleString()} / ${data.total.toLocaleString()} toys (${progressPercent}%)`;
+                  } else {
+                    progressText.textContent = `Parsing: ${data.current.toLocaleString()} toys...`;
+                  }
+                }
+              } catch (e) {
+                console.error('Error parsing SSE data:', e);
+              }
+            }
+          }
         }
-        
-        results.style.display = 'block';
+
+        if (finalData) {
+          const totalToys = finalData.count || 0;
+          const sampleToys = finalData.sample || [];
+          
+          toyCount.textContent = `Total toys parsed: ${totalToys.toLocaleString()}`;
+          
+          const sampleSize = sampleToys.length;
+          sampleInfo.textContent = totalToys > sampleSize
+            ? `Showing sample of ${sampleSize} toys (out of ${totalToys.toLocaleString()} total)`
+            : `Showing all ${totalToys.toLocaleString()} toys`;
+
+          const sampleData = { toys: sampleToys };
+          resultsContent.textContent = JSON.stringify(sampleData, null, 2);
+          
+          if (totalToys > sampleSize && finalData.downloadUrl) {
+            downloadBtn.style.display = 'block';
+            downloadBtn.onclick = () => {
+              window.location.href = finalData.downloadUrl;
+            };
+          }
+          
+          results.style.display = 'block';
+        }
 
         progress.style.display = 'none';
       } catch (err) {
