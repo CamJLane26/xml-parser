@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XML Parser</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+    }
+    h1 {
+      color: #333;
+    }
+    .upload-form {
+      background: #f5f5f5;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .file-input {
+      margin: 10px 0;
+    }
+    input[type="file"] {
+      padding: 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      background: #007bff;
+      color: white;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .progress {
+      margin: 10px 0;
+      display: none;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background: #e0e0e0;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #007bff;
+      width: 0%;
+      transition: width 0.3s;
+    }
+    .results {
+      margin-top: 20px;
+      padding: 15px;
+      background: #f9f9f9;
+      border-radius: 4px;
+      display: none;
+    }
+    .error {
+      color: #d32f2f;
+      background: #ffebee;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+      display: none;
+    }
+    pre {
+      background: #fff;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>XML Parser</h1>
+  <div class="upload-form">
+    <form id="uploadForm" enctype="multipart/form-data">
+      <div class="file-input">
+        <label for="xmlfile">Select XML File:</label>
+        <input type="file" id="xmlfile" name="xmlfile" accept=".xml" required>
+      </div>
+      <button type="submit" id="submitBtn">Parse XML</button>
+    </form>
+    <div class="progress" id="progress">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <p>Uploading and parsing...</p>
+    </div>
+    <div class="error" id="error"></div>
+  </div>
+  <div class="results" id="results">
+    <h2>Parsed Results:</h2>
+    <pre id="resultsContent"></pre>
+  </div>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const progress = document.getElementById('progress');
+    const progressFill = document.getElementById('progressFill');
+    const results = document.getElementById('results');
+    const resultsContent = document.getElementById('resultsContent');
+    const error = document.getElementById('error');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const fileInput = document.getElementById('xmlfile') as HTMLInputElement;
+      if (!fileInput.files || fileInput.files.length === 0) {
+        showError('Please select a file');
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('xmlfile', fileInput.files[0]);
+
+      submitBtn.disabled = true;
+      progress.style.display = 'block';
+      results.style.display = 'none';
+      error.style.display = 'none';
+      progressFill.style.width = '50%';
+
+      try {
+        const response = await fetch('/parse', {
+          method: 'POST',
+          body: formData
+        });
+
+        progressFill.style.width = '100%';
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to parse XML');
+        }
+
+        const data = await response.json();
+        resultsContent.textContent = JSON.stringify(data, null, 2);
+        results.style.display = 'block';
+        progress.style.display = 'none';
+      } catch (err) {
+        showError(err instanceof Error ? err.message : 'An error occurred');
+        progress.style.display = 'none';
+      } finally {
+        submitBtn.disabled = false;
+        progressFill.style.width = '0%';
+      }
+    });
+
+    function showError(message: string): void {
+      error.textContent = message;
+      error.style.display = 'block';
+    }
+  </script>
+</body>
+</html>
