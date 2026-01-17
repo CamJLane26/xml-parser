@@ -6,6 +6,7 @@ import { toySchema } from './config/toySchema';
 import { Readable } from 'stream';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as sax from 'sax';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,6 +14,56 @@ const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+/**
+ * Counts the number of first-level 'toy' elements in an XML file
+ * First-level means direct children of the root element
+ */
+function countFirstLevelToys(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const parser = sax.createStream(true, { lowercase: true });
+    let depth = -1; // Start at -1, will be 0 when root opens
+    let firstLevelToyCount = 0;
+    let insideRoot = false;
+
+    parser.on('opentag', (node: sax.Tag | sax.QualifiedTag) => {
+      const tagName = node.name.toLowerCase();
+      
+      depth++;
+      
+      // When we open the root element (e.g., <toys>), depth becomes 0
+      if (depth === 0) {
+        insideRoot = true;
+      }
+      
+      // If we're at depth 1 (direct child of root) and it's a 'toy' element
+      if (insideRoot && depth === 1 && tagName === 'toy') {
+        firstLevelToyCount++;
+      }
+    });
+
+    parser.on('closetag', (tagName: string) => {
+      if (insideRoot) {
+        depth--;
+        // If we close the root element, we're done
+        if (depth < 0) {
+          insideRoot = false;
+        }
+      }
+    });
+
+    parser.on('error', (err: Error) => {
+      reject(err);
+    });
+
+    parser.on('end', () => {
+      resolve(firstLevelToyCount);
+    });
+
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(parser);
+  });
+}
 
 app.get('/health', (req: Request, res: Response): void => {
   res.json({ status: 'ok' });
@@ -36,7 +87,12 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
   console.log(`[Parse] Output will be saved to: ${outputPath}`);
 
   try {
-    fileStream = (req as any).fileStream as Readable;
+    // Count first-level toy elements
+    const firstLevelToyCount = await countFirstLevelToys(filePath);
+    console.log(`[Upload] Found ${firstLevelToyCount} first-level 'toy' element(s) in the uploaded file`);
+    
+    // Create a fresh stream for parsing (the counting function may have consumed the original stream)
+    fileStream = fs.createReadStream(filePath);
     if (!fileStream) {
       res.status(400).json({ error: 'No file stream available' });
       return;

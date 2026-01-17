@@ -86,4 +86,79 @@ describe('xmlParser', () => {
 
     await expect(parseXML(stream, toySchema)).rejects.toThrow();
   });
+
+  test('should handle object field type', async () => {
+    const schema: ElementSchema = {
+      rootElement: 'toy',
+      fields: [
+        { type: 'text', name: 'name' },
+        {
+          type: 'object',
+          name: 'details',
+          fields: [
+            { type: 'text', name: 'color' },
+            { type: 'text', name: 'size' }
+          ]
+        }
+      ]
+    };
+
+    const xml = '<toy><name>Brick</name><details><color>Blue</color><size>Large</size></details></toy>';
+    const stream = createStream(xml);
+    const result = await parseXML(stream, schema);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].details).toEqual({
+      color: 'Blue',
+      size: 'Large'
+    });
+  });
+
+  test('should handle deeply nested elements', async () => {
+    const schema: ElementSchema = {
+      rootElement: 'toy',
+      fields: [
+        { type: 'text', name: 'name' },
+        {
+          type: 'object',
+          name: 'category',
+          fields: [
+            { type: 'text', name: 'type' },
+            {
+              type: 'object',
+              name: 'subcategory',
+              fields: [
+                { type: 'text', name: 'name' }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+
+    const xml = '<toy><name>Brick</name><category><type>Building</type><subcategory><name>Blocks</name></subcategory></category></toy>';
+    const stream = createStream(xml);
+    const result = await parseXML(stream, schema);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].category.subcategory.name).toBe('Blocks');
+  });
+
+  test('should handle XML with attributes', async () => {
+    const xml = '<toy id="123"><name>Brick</name><color>Blue</color></toy>';
+    const stream = createStream(xml);
+    const result = await parseXML(stream, toySchema);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('Brick');
+  });
+
+  test('should handle empty root element', async () => {
+    const xml = '<toy></toy>';
+    const stream = createStream(xml);
+    const result = await parseXML(stream, toySchema);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBeUndefined();
+  });
 });
