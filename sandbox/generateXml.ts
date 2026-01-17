@@ -46,7 +46,7 @@ function generateXmlFile(numToys: number, outputPath: string): void {
   console.log(`Generated XML file with ${numToys} toys at: ${outputPath}`);
 }
 
-const NUM_TOYS = 10;
+const NUM_TOYS = 2000000;
 const outputPath = path.join(__dirname, 'sample.xml');
 
 generateXmlFile(NUM_TOYS, outputPath);

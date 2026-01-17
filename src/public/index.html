@@ -76,6 +76,19 @@
       margin-top: 10px;
       display: none;
     }
+    .summary {
+      margin-bottom: 15px;
+      padding: 10px;
+      background: #e3f2fd;
+      border-radius: 4px;
+    }
+    .summary h3 {
+      margin: 0 0 10px 0;
+      color: #1976d2;
+    }
+    .summary p {
+      margin: 5px 0;
+    }
     pre {
       background: #fff;
       padding: 10px;
@@ -83,6 +96,19 @@
       overflow-x: auto;
       max-height: 400px;
       overflow-y: auto;
+    }
+    .download-btn {
+      background: #28a745;
+      color: white;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    .download-btn:hover {
+      background: #218838;
     }
   </style>
 </head>
@@ -105,8 +131,14 @@
     <div class="error" id="error"></div>
   </div>
   <div class="results" id="results">
-    <h2>Parsed Results:</h2>
+    <div class="summary" id="summary">
+      <h3>Summary</h3>
+      <p id="toyCount">Parsing...</p>
+      <p id="sampleInfo"></p>
+    </div>
+    <h3>Sample Results (first 20 toys):</h3>
     <pre id="resultsContent"></pre>
+    <button class="download-btn" id="downloadBtn" style="display: none;">Download Full Results (JSON)</button>
   </div>
 
   <script>
@@ -117,6 +149,9 @@
     const results = document.getElementById('results');
     const resultsContent = document.getElementById('resultsContent');
     const error = document.getElementById('error');
+    const toyCount = document.getElementById('toyCount');
+    const sampleInfo = document.getElementById('sampleInfo');
+    const downloadBtn = document.getElementById('downloadBtn');
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -142,16 +177,45 @@
           body: formData
         });
 
-        progressFill.style.width = '100%';
+        progressFill.style.width = '75%';
 
         if (!response.ok) {
           const errorData = await response.json();
           throw new Error(errorData.error || 'Failed to parse XML');
         }
 
+        if (!response.body) {
+          throw new Error('No response body');
+        }
+
+        progressFill.style.width = '90%';
+
         const data = await response.json();
-        resultsContent.textContent = JSON.stringify(data, null, 2);
+
+        progressFill.style.width = '100%';
+
+        const totalToys = data.count || 0;
+        const sampleToys = data.sample || [];
+        
+        toyCount.textContent = `Total toys parsed: ${totalToys.toLocaleString()}`;
+        
+        const sampleSize = sampleToys.length;
+        sampleInfo.textContent = totalToys > sampleSize
+          ? `Showing sample of ${sampleSize} toys (out of ${totalToys.toLocaleString()} total)`
+          : `Showing all ${totalToys.toLocaleString()} toys`;
+
+        const sampleData = { toys: sampleToys };
+        resultsContent.textContent = JSON.stringify(sampleData, null, 2);
+        
+        if (totalToys > sampleSize && data.downloadUrl) {
+          downloadBtn.style.display = 'block';
+          downloadBtn.onclick = () => {
+            window.location.href = data.downloadUrl;
+          };
+        }
+        
         results.style.display = 'block';
+
         progress.style.display = 'none';
       } catch (err) {
         showError(err instanceof Error ? err.message : 'An error occurred');

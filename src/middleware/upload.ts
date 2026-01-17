@@ -1,8 +1,18 @@
 import multer from 'multer';
 import { Request, Response, NextFunction } from 'express';
-import { Readable } from 'stream';
+import { createReadStream } from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, os.tmpdir());
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'xml-upload-' + uniqueSuffix + '.xml');
+  }
+});
 
 const fileFilter = (
   req: Request,
@@ -38,9 +48,9 @@ export const uploadMiddleware = (
     if (!req.file) {
       return next(new Error('No file uploaded'));
     }
-    if (req.file.buffer) {
-      (req as any).fileStream = Readable.from(req.file.buffer);
-    }
+    const filePath = req.file.path;
+    (req as any).fileStream = createReadStream(filePath);
+    (req as any).filePath = filePath;
     next();
   });
 };

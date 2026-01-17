@@ -84,6 +84,82 @@ export function parseXML(stream: Readable, schema: ElementSchema): Promise<Parse
   });
 }
 
+export function parseXMLStream(
+  stream: Readable,
+  schema: ElementSchema,
+  onToy: (toy: ParsedObject) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const parser = sax.createStream(true, { lowercase: true });
+    let currentElement: ElementContext | undefined;
+    let rootElement: ElementContext | undefined;
+
+    parser.on('opentag', (node: sax.Tag | sax.QualifiedTag) => {
+      const tagName = node.name.toLowerCase();
+      const attrs: Record<string, string> = {};
+      if (node.attributes) {
+        for (const [key, value] of Object.entries(node.attributes)) {
+          attrs[key] = typeof value === 'string' ? value : value.value;
+        }
+      }
+      const newElement: ElementContext = {
+        name: tagName,
+        text: '',
+        attributes: attrs,
+        children: new Map(),
+        parent: currentElement
+      };
+
+      if (tagName === schema.rootElement.toLowerCase()) {
+        rootElement = newElement;
+      }
+
+      if (currentElement) {
+        if (!currentElement.children.has(tagName)) {
+          currentElement.children.set(tagName, []);
+        }
+        currentElement.children.get(tagName)!.push(newElement);
+      }
+
+      currentElement = newElement;
+    });
+
+    parser.on('text', (text: string) => {
+      if (currentElement) {
+        currentElement.text += text;
+      }
+    });
+
+    parser.on('closetag', (tagName: string) => {
+      const lowerTagName = tagName.toLowerCase();
+
+      if (lowerTagName === schema.rootElement.toLowerCase() && rootElement) {
+        const parsed = extractObject(rootElement, schema);
+        if (parsed) {
+          onToy(parsed);
+        }
+        rootElement = undefined;
+      }
+
+      if (currentElement?.parent) {
+        currentElement = currentElement.parent;
+      } else {
+        currentElement = undefined;
+      }
+    });
+
+    parser.on('error', (err: Error) => {
+      reject(err);
+    });
+
+    parser.on('end', () => {
+      resolve();
+    });
+
+    stream.pipe(parser);
+  });
+}
+
 function extractObject(element: ElementContext, schema: ElementSchema): ParsedObject | null {
   const result: ParsedObject = {};
 
