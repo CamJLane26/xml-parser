@@ -10,7 +10,9 @@ import { getClient, insertToysBatch, closePool } from './db/postgres';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '1000', 10);
+const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '100', 10);
+const MAX_BATCH_SIZE = BATCH_SIZE * 2; // Safety limit to prevent runaway batches
+const BATCH_FLUSH_INTERVAL_MS = parseInt(process.env.BATCH_FLUSH_INTERVAL_MS || '5000', 10); // Flush batch after 5 seconds
 const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true, set to 'false' to disable
 
 app.use(express.json());
@@ -128,6 +130,27 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
 
     await parseXMLStream(fileStream, toySchema, async (toy) => {
       toyCount++;
+      
+      // Safety check: prevent batch from growing too large
+      if (batch.length >= MAX_BATCH_SIZE) {
+        console.warn(`[Parse] Batch size exceeded ${MAX_BATCH_SIZE}, forcing insert to prevent memory issues`);
+        // @ts-ignore
+        if (USE_DATABASE && dbClient) {
+          try {
+            await insertToysBatch(dbClient, batch, batchId);
+            batch = [];
+            lastBatchInsertTime = Date.now();
+          } catch (dbError) {
+            console.error('[Parse] Forced batch insert error:', dbError);
+            // Clear batch even on error to prevent memory issues
+            batch = [];
+          }
+        } else {
+          // If database disabled, clear batch anyway
+          batch = [];
+        }
+      }
+      
       batch.push(toy);
 
       // Collect sample toys
@@ -136,15 +159,21 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
         sampleToys.push(toyCopy);
       }
 
-      // Insert batch when it reaches the batch size (if database is enabled)
+      // Check if we need to flush based on time (prevent stale batches)
+      const timeSinceLastInsert = Date.now() - lastBatchInsertTime;
+      const shouldFlushByTime = batch.length > 0 && timeSinceLastInsert >= BATCH_FLUSH_INTERVAL_MS;
+
+      // Insert batch when it reaches the batch size or time limit (if database is enabled)
       // @ts-ignore
-      if (USE_DATABASE && dbClient && batch.length >= BATCH_SIZE) {
+      if (USE_DATABASE && dbClient && (batch.length >= BATCH_SIZE || shouldFlushByTime)) {
         try {
           await insertToysBatch(dbClient, batch, batchId);
           batch = [];
           lastBatchInsertTime = Date.now();
         } catch (dbError) {
           console.error('[Parse] Database insert error:', dbError);
+          // Always clear batch on error to prevent memory accumulation
+          batch = [];
           // Continue parsing even if database insert fails
         }
       }
