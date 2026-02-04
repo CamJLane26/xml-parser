@@ -1,4 +1,5 @@
 import { Pool, PoolClient, QueryResult } from 'pg';
+import { Toy } from '../types/toy';
 
 let pool: Pool | null = null;
 
@@ -54,7 +55,7 @@ export async function closePool(): Promise<void> {
  */
 export async function insertToysBatch(
   client: PoolClient,
-  toys: any[],
+  toys: Toy[],
   batchId?: string
 ): Promise<number> {
   if (toys.length === 0) {

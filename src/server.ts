@@ -7,6 +7,7 @@ import { Readable } from 'stream';
 import * as fs from 'fs';
 import * as sax from 'sax';
 import { getClient, insertToysBatch, closePool } from './db/postgres';
+import { Toy } from './types/toy';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,37 +19,65 @@ const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true, s
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const DOCUMENT_HEADER_ELEMENTS = ['date', 'author'];
+
+export interface DocumentHeader {
+  date?: string;
+  author?: string;
+}
+
 /**
- * Counts the number of first-level 'toy' elements in an XML file
- * First-level means direct children of the root element
+ * Counts first-level 'toy' elements and extracts document-level header fields
+ * (e.g. <date>, <author>) that appear as direct children of the root.
+ * First-level means direct children of the root element.
  */
-function countFirstLevelToys(filePath: string): Promise<number> {
+function countFirstLevelToysAndHeader(filePath: string): Promise<{ firstLevelToyCount: number; header: DocumentHeader }> {
   return new Promise((resolve, reject) => {
     const parser = sax.createStream(true, { lowercase: true });
-    let depth = -1; // Start at -1, will be 0 when root opens
+    let depth = -1;
     let firstLevelToyCount = 0;
     let insideRoot = false;
+    let collectingHeader: string | null = null;
+    let headerText = '';
+    const header: DocumentHeader = {};
 
     parser.on('opentag', (node: sax.Tag | sax.QualifiedTag) => {
       const tagName = node.name.toLowerCase();
-      
+
       depth++;
-      
-      // When we open the root element (e.g., <toys>), depth becomes 0
+
       if (depth === 0) {
         insideRoot = true;
       }
-      
-      // If we're at depth 1 (direct child of root) and it's a 'toy' element
-      if (insideRoot && depth === 1 && tagName === 'toy') {
-        firstLevelToyCount++;
+
+      if (insideRoot && depth === 1) {
+        if (DOCUMENT_HEADER_ELEMENTS.includes(tagName) && !(tagName in header)) {
+          collectingHeader = tagName;
+          headerText = '';
+        }
+        if (tagName === 'toy') {
+          firstLevelToyCount++;
+        }
+      }
+    });
+
+    parser.on('text', (text: string) => {
+      if (collectingHeader) {
+        headerText += text;
       }
     });
 
     parser.on('closetag', (tagName: string) => {
+      const lowerTagName = tagName.toLowerCase();
+      if (insideRoot && depth === 1 && collectingHeader === lowerTagName) {
+        const value = headerText.trim();
+        if (lowerTagName === 'date') header.date = value;
+        if (lowerTagName === 'author') header.author = value;
+        collectingHeader = null;
+        headerText = '';
+      }
       if (insideRoot) {
         depth--;
-        // If we close the root element, we're done
         if (depth < 0) {
           insideRoot = false;
         }
@@ -60,7 +89,7 @@ function countFirstLevelToys(filePath: string): Promise<number> {
     });
 
     parser.on('end', () => {
-      resolve(firstLevelToyCount);
+      resolve({ firstLevelToyCount, header });
     });
 
     const fileStream = fs.createReadStream(filePath);
@@ -87,9 +116,12 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
   console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
 
   try {
-    // Count first-level toy elements
-    const firstLevelToyCount = await countFirstLevelToys(filePath);
+    // Count first-level toy elements and extract document-level header (date, author)
+    const { firstLevelToyCount, header: documentHeader } = await countFirstLevelToysAndHeader(filePath);
     console.log(`[Upload] Found ${firstLevelToyCount} first-level 'toy' element(s) in the uploaded file`);
+    if (documentHeader.date != null || documentHeader.author != null) {
+      console.log(`[Upload] Document header: date=${documentHeader.date ?? '(none)'}, author=${documentHeader.author ?? '(none)'}`);
+    }
     
     // Create a fresh stream for parsing (the counting function may have consumed the original stream)
     fileStream = fs.createReadStream(filePath);
@@ -123,14 +155,20 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     }
 
     let toyCount = 0;
-    const sampleToys: any[] = [];
-    let batch: any[] = [];
+    const sampleToys: Toy[] = [];
+    let batch: Toy[] = [];
     let lastProgressSent = -1;
     let lastBatchInsertTime = Date.now();
 
+    const mergeDocumentHeader = (toy: Toy): Toy =>
+      (documentHeader.date != null || documentHeader.author != null)
+        ? { ...toy, ...documentHeader } as Toy
+        : toy;
+
     await parseXMLStream(fileStream, toySchema, async (toy) => {
       toyCount++;
-      
+      const toyWithHeader = mergeDocumentHeader(toy);
+
       // Safety check: prevent batch from growing too large
       if (batch.length >= MAX_BATCH_SIZE) {
         console.warn(`[Parse] Batch size exceeded ${MAX_BATCH_SIZE}, forcing insert to prevent memory issues`);
@@ -151,11 +189,11 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
         }
       }
       
-      batch.push(toy);
+      batch.push(toyWithHeader);
 
       // Collect sample toys
       if (sampleToys.length < 20) {
-        const toyCopy = JSON.parse(JSON.stringify(toy));
+        const toyCopy = JSON.parse(JSON.stringify(toyWithHeader));
         sampleToys.push(toyCopy);
       }
 
