@@ -17,9 +17,54 @@ const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '100', 10);
 const MAX_BATCH_SIZE = BATCH_SIZE * 2; // Safety limit
 const BATCH_FLUSH_INTERVAL_MS = parseInt(process.env.BATCH_FLUSH_INTERVAL_MS || '5000', 10);
 const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true
+const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage');
+const STORAGE_MAX_AGE_MS = parseInt(process.env.STORAGE_MAX_AGE_MS || '3600000', 10); // 1 hour default
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+/**
+ * Clean up old files in storage directory (handles orphaned files from crashes)
+ */
+function cleanupOldStorageFiles(): void {
+  try {
+    if (!fs.existsSync(STORAGE_DIR)) {
+      return;
+    }
+
+    const files = fs.readdirSync(STORAGE_DIR);
+    const now = Date.now();
+    let cleanedCount = 0;
+
+    for (const file of files) {
+      if (!file.startsWith('xml-upload-')) {
+        continue; // Skip non-upload files
+      }
+
+      const filePath = path.join(STORAGE_DIR, file);
+      try {
+        const stats = fs.statSync(filePath);
+        const age = now - stats.mtimeMs;
+
+        if (age > STORAGE_MAX_AGE_MS) {
+          fs.unlinkSync(filePath);
+          cleanedCount++;
+        }
+      } catch (err) {
+        console.error(`[Cleanup] Error processing file ${file}:`, err);
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(`[Cleanup] Removed ${cleanedCount} orphaned file(s) from storage`);
+    }
+  } catch (err) {
+    console.error('[Cleanup] Error cleaning storage directory:', err);
+  }
+}
+
+// Clean up orphaned files on startup
+cleanupOldStorageFiles();
 
 const DOCUMENT_HEADER_ELEMENTS = ['date', 'author'];
 
@@ -117,6 +162,18 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
   console.log(`[Upload] File saved to: ${filePath}`);
   console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
 
+  // Helper function to clean up temporary file
+  const cleanupFile = () => {
+    if (filePath && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`[Cleanup] Deleted temporary file: ${filePath}`);
+      } catch (unlinkError) {
+        console.error('[Cleanup] Error deleting temp file:', unlinkError);
+      }
+    }
+  };
+
   try {
     // Count first-level toy elements and extract document-level header (date, author)
     const { firstLevelToyCount, header: documentHeader } = await countFirstLevelToysAndHeader(filePath);
@@ -128,6 +185,7 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     // Create a fresh stream for parsing (the counting function may have consumed the original stream)
     fileStream = fs.createReadStream(filePath);
     if (!fileStream) {
+      cleanupFile(); // Clean up before returning
       res.status(400).json({ error: 'No file stream available' });
       return;
     }
@@ -291,6 +349,7 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     // Send error via SSE before ending
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error('[Parse] Error:', errorMessage);
+    console.error('[Parse] Parsing failed - cleaning up temporary file');
     res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
     res.end();
     next(error);
@@ -300,20 +359,80 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
       dbClient.release();
     }
     
-    // Clean up temporary file
-    if (filePath && fs.existsSync(filePath)) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (unlinkError) {
-        console.error('[Parse] Error deleting temp file:', unlinkError);
-      }
-    }
+    // Clean up temporary file (always executes, even on error)
+    cleanupFile();
   }
 });
 
 app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
   console.error('Error:', err);
   res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
+// Handle uncaught exceptions (including heap overflow errors)
+process.on('uncaughtException', async (err: Error) => {
+  console.error('UNCAUGHT EXCEPTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  
+  // Attempt cleanup before crash
+  console.log('[Emergency] Attempting to clean up storage directory...');
+  try {
+    cleanupOldStorageFiles();
+  } catch (cleanupErr) {
+    console.error('[Emergency] Cleanup failed:', cleanupErr);
+  }
+  
+  if (USE_DATABASE) {
+    try {
+      await closePool();
+    } catch (poolErr) {
+      console.error('[Emergency] Pool close failed:', poolErr);
+    }
+  }
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason: any) => {
+  console.error('UNHANDLED REJECTION! Shutting down...');
+  console.error(reason);
+  
+  if (USE_DATABASE) {
+    try {
+      await closePool();
+    } catch (poolErr) {
+      console.error('[Emergency] Pool close failed:', poolErr);
+    }
+  }
+  process.exit(1);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (err: Error) => {
+  console.error('UNCAUGHT EXCEPTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  
+  // Clean up storage directory before exiting
+  console.log('[Emergency] Cleaning up storage directory...');
+  cleanupOldStorageFiles();
+  
+  if (USE_DATABASE) {
+    await closePool();
+  }
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason: any) => {
+  console.error('UNHANDLED REJECTION! Shutting down...');
+  console.error(reason);
+  
+  if (USE_DATABASE) {
+    await closePool();
+  }
+  process.exit(1);
 });
 
 // Graceful shutdown
