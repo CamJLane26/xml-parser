@@ -11,10 +11,12 @@ import { Toy } from './types/toy';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Configuration (optimized for large files: 100MB-1GB+)
 const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '100', 10);
-const MAX_BATCH_SIZE = BATCH_SIZE * 2; // Safety limit to prevent runaway batches
-const BATCH_FLUSH_INTERVAL_MS = parseInt(process.env.BATCH_FLUSH_INTERVAL_MS || '5000', 10); // Flush batch after 5 seconds
-const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true, set to 'false' to disable
+const MAX_BATCH_SIZE = BATCH_SIZE * 2; // Safety limit
+const BATCH_FLUSH_INTERVAL_MS = parseInt(process.env.BATCH_FLUSH_INTERVAL_MS || '5000', 10);
+const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -231,10 +233,13 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
         }
       }
 
+      // Trigger manual GC every 100K records (--expose-gc flag in package.json)
       if (toyCount % 100000 === 0) {
         console.log(`[Parse] Processed ${toyCount.toLocaleString()} toys...`);
         if (global.gc) {
           global.gc();
+          const memUsage = process.memoryUsage();
+          console.log(`[Memory] Heap: ${(memUsage.heapUsed / 1024 / 1024).toFixed(1)}MB / ${(memUsage.heapTotal / 1024 / 1024).toFixed(1)}MB`);
         }
       }
     });

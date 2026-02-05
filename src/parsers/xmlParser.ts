@@ -84,6 +84,10 @@ export function parseXML(stream: Readable, schema: ElementSchema): Promise<Parse
   });
 }
 
+/**
+ * Parse XML file stream with memory-efficient streaming for large files (100MB-1GB+).
+ * Processes elements one at a time with constant memory footprint.
+ */
 export function parseXMLStream(
   stream: Readable,
   schema: ElementSchema,
