@@ -5,11 +5,13 @@ A simple Express microservice written in TypeScript that parses XML files with s
 ## Features
 
 - Streaming XML parsing using SAX for memory-efficient processing
+- **Job queue system**: Processes one large file at a time to prevent memory issues with concurrent uploads
 - Configurable schema system for flexible element extraction
 - Support for nested elements at arbitrary depths
 - Automatic grouping of repeated nested elements into arrays
 - Simple web interface for file upload
 - Handles large files (up to 1 GB) via streaming
+- Real-time progress updates via Server-Sent Events
 
 ## Installation
 
@@ -52,7 +54,17 @@ npm test
 Serves the HTML upload form.
 
 ### GET `/health`
-Health check endpoint. Returns `{ status: "ok" }`.
+Health check endpoint with queue status:
+```json
+{
+  "status": "ok",
+  "queue": {
+    "length": 2,
+    "running": 1,
+    "idle": false
+  }
+}
+```
 
 ### POST `/parse`
 Parses an uploaded XML file.
@@ -106,9 +118,24 @@ Example schema:
 ## Architecture
 
 - **Streaming Architecture**: Files are processed in streams to handle large files efficiently
+- **Job Queue**: Processes one large file at a time to prevent memory issues (see [QUEUE.md](./QUEUE.md))
 - **SAX Parsing**: Event-driven XML parsing for memory-efficient processing
 - **Schema-Driven**: Configurable extraction rules for flexibility
 - **TypeScript**: Full type safety throughout the codebase
+
+## Queue System
+
+Multiple users can upload files simultaneously. Files are automatically queued and processed one at a time to ensure:
+- Predictable memory usage (~200-600MB per file)
+- No out-of-memory errors from concurrent large files
+- Fair FIFO processing
+
+**User Experience:**
+- First upload: processes immediately
+- Subsequent uploads: queued with position shown
+- Progress updates via Server-Sent Events
+
+📖 **See [QUEUE.md](./QUEUE.md) for detailed queue documentation**
 
 ## Dependencies
 

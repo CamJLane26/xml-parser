@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as sax from 'sax';
 import { getClient, insertToysBatch, closePool } from './db/postgres';
 import { Toy } from './types/toy';
+import { queue as asyncQueue, QueueObject } from 'async';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,6 +18,31 @@ const BATCH_SIZE = parseInt(process.env.DB_BATCH_SIZE || '100', 10);
 const MAX_BATCH_SIZE = BATCH_SIZE * 2; // Safety limit
 const BATCH_FLUSH_INTERVAL_MS = parseInt(process.env.BATCH_FLUSH_INTERVAL_MS || '5000', 10);
 const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true
+
+// Parse job interface
+interface ParseJob {
+  req: Request;
+  res: Response;
+  next: NextFunction;
+  filePath: string;
+  batchId: string;
+}
+
+// Create a queue that processes 1 file at a time
+const parseQueue: QueueObject<ParseJob> = asyncQueue(async (job: ParseJob) => {
+  console.log(`[Queue] Starting processing (queue length: ${parseQueue.length()}, running: ${parseQueue.running()})`);
+  await processParseJob(job);
+  console.log(`[Queue] Finished processing (queue length: ${parseQueue.length()}, running: ${parseQueue.running()})`);
+}, 1); // concurrency = 1 (one file at a time)
+
+// Queue event handlers
+parseQueue.error((err, job) => {
+  console.error('[Queue] Job failed with error:', err);
+});
+
+parseQueue.drain(() => {
+  console.log('[Queue] All jobs processed, queue is now empty');
+});
 const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), 'storage');
 const STORAGE_MAX_AGE_MS = parseInt(process.env.STORAGE_MAX_AGE_MS || '3600000', 10); // 1 hour default
 
@@ -145,21 +171,30 @@ function countFirstLevelToysAndHeader(filePath: string): Promise<{ firstLevelToy
 }
 
 app.get('/health', (req: Request, res: Response): void => {
-  res.json({ status: 'ok' });
+  res.json({ 
+    status: 'ok',
+    queue: {
+      length: parseQueue.length(),
+      running: parseQueue.running(),
+      idle: parseQueue.idle(),
+    }
+  });
 });
 
 app.get('/', (req: Request, res: Response): void => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  const filePath = (req as any).filePath as string;
+/**
+ * Process a parse job from the queue
+ */
+async function processParseJob(job: ParseJob): Promise<void> {
+  const { req, res, next, filePath, batchId } = job;
   let fileStream: Readable | undefined;
   // @ts-ignore
   let dbClient = null;
-  const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
 
-  console.log(`[Upload] File saved to: ${filePath}`);
+  console.log(`[Queue] Processing file: ${filePath}`);
   console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
 
   // Helper function to clean up temporary file
@@ -362,6 +397,40 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
     // Clean up temporary file (always executes, even on error)
     cleanupFile();
   }
+}
+
+app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  const filePath = (req as any).filePath as string;
+  const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+
+  console.log(`[Upload] File saved to: ${filePath}`);
+  console.log(`[Queue] Current queue length: ${parseQueue.length()}`);
+  console.log(`[Queue] Adding job to queue (batch ID: ${batchId})`);
+
+  // Set up Server-Sent Events immediately
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  // Send queue position info
+  const queuePosition = parseQueue.length() + (parseQueue.running() > 0 ? 1 : 0);
+  if (queuePosition > 1) {
+    res.write(`data: ${JSON.stringify({ 
+      queued: true, 
+      position: queuePosition,
+      message: `In queue. Position: ${queuePosition}. Processing will start soon...`
+    })}\n\n`);
+  }
+
+  // Add job to queue
+  parseQueue.push({
+    req,
+    res,
+    next,
+    filePath,
+    batchId,
+  });
 });
 
 app.use((err: Error, req: Request, res: Response, next: NextFunction): void => {
