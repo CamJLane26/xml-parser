@@ -1,6 +1,8 @@
 # XML Parser Microservice
 
-A simple Express microservice written in TypeScript that parses XML files with streaming support. The service accepts XML file uploads, extracts data based on a configurable schema, and returns typed JSON responses.
+Express microservice for parsing XML files with streaming support and REST API. Includes job queue system for handling large files (100MB-1GB) with multiple concurrent users.
+
+📖 **[REST API Docs](./API.md)** | **[API Quick Reference](../API-QUICK-REFERENCE.md)** | **[Queue System](./QUEUE.md)**
 
 ## Features
 
@@ -50,46 +52,37 @@ npm test
 
 ## API Endpoints
 
-### GET `/`
-Serves the HTML upload form.
+### Web UI Endpoints
 
-### GET `/health`
-Health check endpoint with queue status:
-```json
-{
-  "status": "ok",
-  "queue": {
-    "length": 2,
-    "running": 1,
-    "idle": false
-  }
-}
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | HTML upload form |
+| `/health` | GET | Health check with queue status |
+| `/parse` | POST | Parse XML via SSE (for built-in web UI) |
 
-### POST `/parse`
-Parses an uploaded XML file.
+### REST API Endpoints (for external frontends)
 
-**Request:**
-- Content-Type: `multipart/form-data`
-- Field name: `xmlfile`
-- File must have `.xml` extension
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/parse` | POST | Upload & parse (returns job ID) |
+| `/api/status/:jobId` | GET | Check parsing progress |
+| `/api/result/:jobId` | GET | Get results after completion |
 
-**Response:**
-```json
-{
-  "toys": [
-    {
-      "name": "Brick",
-      "color": "Blue",
-      "store": [
-        {
-          "name": "Target",
-          "location": "Texas"
-        }
-      ]
-    }
-  ]
-}
+📖 **See [API.md](./API.md) for complete REST API documentation with code examples**
+
+**Quick Example:**
+```bash
+# Upload file
+curl -X POST -F "xmlfile=@sample.xml" http://localhost:3000/api/parse
+# Returns: {"jobId": "batch-123...", "status": "processing"}
+
+# Check status
+curl http://localhost:3000/api/status/batch-123...
+# Returns: {"job": {"status": "processing", "progress": 45}}
+
+# Get results (when complete)
+curl http://localhost:3000/api/result/batch-123...
+# Returns: {"result": {"count": 10000, "sample": [...]}}
 ```
 
 ## Schema Configuration

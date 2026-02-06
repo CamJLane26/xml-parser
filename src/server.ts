@@ -22,10 +22,12 @@ const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default to true
 // Parse job interface
 interface ParseJob {
   req: Request;
-  res: Response;
+  res: Response | null;
   next: NextFunction;
   filePath: string;
   batchId: string;
+  jobId?: string;
+  isApi?: boolean;
 }
 
 // Create a queue that processes 1 file at a time
@@ -170,6 +172,10 @@ function countFirstLevelToysAndHeader(filePath: string): Promise<{ firstLevelToy
   });
 }
 
+// Store completed job results temporarily (in production, use Redis)
+const jobResults = new Map<string, any>();
+const JOB_RESULT_TTL = 3600000; // Keep results for 1 hour
+
 app.get('/health', (req: Request, res: Response): void => {
   res.json({ 
     status: 'ok',
@@ -186,16 +192,134 @@ app.get('/', (req: Request, res: Response): void => {
 });
 
 /**
+ * API: Upload and parse XML file (returns job ID for polling)
+ */
+app.post('/api/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  const filePath = (req as any).filePath as string;
+  const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+  const jobId = batchId;
+
+  console.log(`[API] File uploaded: ${filePath}`);
+  console.log(`[API] Job ID: ${jobId}`);
+
+  // Initialize job status
+  jobResults.set(jobId, {
+    id: jobId,
+    status: 'queued',
+    queuePosition: parseQueue.length() + (parseQueue.running() > 0 ? 1 : 0),
+    progress: 0,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Clean up old job results
+  setTimeout(() => {
+    jobResults.delete(jobId);
+    console.log(`[API] Cleaned up job result: ${jobId}`);
+  }, JOB_RESULT_TTL);
+
+  // Add to queue with callback to update status
+  parseQueue.push({
+    req,
+    res: null as any, // No SSE for API endpoint
+    next,
+    filePath,
+    batchId,
+    jobId,
+    isApi: true,
+  } as any);
+
+  // Return job ID immediately
+  res.json({
+    success: true,
+    jobId,
+    status: 'queued',
+    queuePosition: parseQueue.length(),
+    statusUrl: `/api/status/${jobId}`,
+    resultUrl: `/api/result/${jobId}`,
+  });
+});
+
+/**
+ * API: Check job status
+ */
+app.get('/api/status/:jobId', (req: Request, res: Response): void => {
+  const jobId = req.params.jobId as string;
+  const job = jobResults.get(jobId);
+
+  if (!job) {
+    res.status(404).json({
+      success: false,
+      error: 'Job not found or expired',
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    job,
+  });
+});
+
+/**
+ * API: Get job result (only if completed)
+ */
+app.get('/api/result/:jobId', (req: Request, res: Response): void => {
+  const jobId = req.params.jobId as string;
+  const job = jobResults.get(jobId);
+
+  if (!job) {
+    res.status(404).json({
+      success: false,
+      error: 'Job not found or expired',
+    });
+    return;
+  }
+
+  if (job.status !== 'completed') {
+    res.status(400).json({
+      success: false,
+      error: `Job is ${job.status}, not completed`,
+      status: job.status,
+      progress: job.progress,
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    result: job.result,
+  });
+});
+
+/**
  * Process a parse job from the queue
  */
 async function processParseJob(job: ParseJob): Promise<void> {
-  const { req, res, next, filePath, batchId } = job;
+  const { req, res, next, filePath, batchId, jobId, isApi } = job;
   let fileStream: Readable | undefined;
   // @ts-ignore
   let dbClient = null;
 
   console.log(`[Queue] Processing file: ${filePath}`);
   console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
+
+  // Helper function to update job status (for API)
+  const updateJobStatus = (updates: any) => {
+    if (isApi && jobId) {
+      const current = jobResults.get(jobId) || {};
+      jobResults.set(jobId, { ...current, ...updates, updatedAt: new Date().toISOString() });
+    }
+  };
+
+  // Helper function to send progress (for SSE)
+  const sendProgress = (progress: number, current: number, total: number): void => {
+    if (res) {
+      res.write(`data: ${JSON.stringify({ progress, current, total })}\n\n`);
+    }
+    if (isApi) {
+      updateJobStatus({ progress, current, total, status: 'processing' });
+    }
+  };
 
   // Helper function to clean up temporary file
   const cleanupFile = () => {
@@ -221,22 +345,27 @@ async function processParseJob(job: ParseJob): Promise<void> {
     fileStream = fs.createReadStream(filePath);
     if (!fileStream) {
       cleanupFile(); // Clean up before returning
-      res.status(400).json({ error: 'No file stream available' });
+      if (res) {
+        res.status(400).json({ error: 'No file stream available' });
+      } else if (isApi) {
+        updateJobStatus({ status: 'failed', error: 'No file stream available' });
+      }
       return;
     }
 
-    // Set up Server-Sent Events for progress updates
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
-
-    const sendProgress = (progress: number, current: number, total: number): void => {
-      res.write(`data: ${JSON.stringify({ progress, current, total })}\n\n`);
-    };
+    // Set up Server-Sent Events for progress updates (if not API mode)
+    if (res) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+    }
 
     // Send initial progress with total count
     sendProgress(0, 0, firstLevelToyCount);
+    if (isApi) {
+      updateJobStatus({ status: 'processing', totalRecords: firstLevelToyCount });
+    }
 
     // Get database client and start transaction (if database is enabled)
     if (USE_DATABASE) {
@@ -365,12 +494,26 @@ async function processParseJob(job: ParseJob): Promise<void> {
 
     // Send final progress and result
     sendProgress(100, toyCount, firstLevelToyCount);
-    res.write(`data: ${JSON.stringify({ 
-      done: true, 
-      count: toyCount, 
+    
+    const finalResult = {
+      done: true,
+      count: toyCount,
       sample: sampleToys
-    })}\n\n`);
-    res.end();
+    };
+    
+    if (res) {
+      res.write(`data: ${JSON.stringify(finalResult)}\n\n`);
+      res.end();
+    }
+    
+    if (isApi) {
+      updateJobStatus({
+        status: 'completed',
+        progress: 100,
+        result: finalResult,
+        completedAt: new Date().toISOString(),
+      });
+    }
   } catch (error) {
     // Rollback transaction on error (if database is enabled)
     if (USE_DATABASE && dbClient) {
@@ -385,9 +528,21 @@ async function processParseJob(job: ParseJob): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error('[Parse] Error:', errorMessage);
     console.error('[Parse] Parsing failed - cleaning up temporary file');
-    res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
-    res.end();
-    next(error);
+    
+    if (res) {
+      res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
+      res.end();
+    }
+    
+    if (isApi) {
+      updateJobStatus({
+        status: 'failed',
+        error: errorMessage,
+        failedAt: new Date().toISOString(),
+      });
+    }
+    
+    if (next) next(error);
   } finally {
     // Release database client
     if (dbClient) {
