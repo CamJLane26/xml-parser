@@ -1,126 +1,90 @@
-import { Pool, PoolClient, QueryResult } from 'pg';
+import pgPromise from 'pg-promise';
 import { Toy } from '../types/toy';
 
-let pool: Pool | null = null;
+const pgp = pgPromise();
+
+// Column set for batch upserts using pgp.helpers
+const toyColumns = new pgp.helpers.ColumnSet(
+  [
+    'name',
+    'uuid',
+    { name: 'data', cast: 'jsonb' },
+    { name: 'created_at', def: 'NOW()', mod: ':raw' },
+  ],
+  { table: { table: 'toys', schema: 'public' } }
+);
+
+let db: pgPromise.IDatabase<{}> | null = null;
 
 /**
- * Initialize PostgreSQL connection pool
+ * Get the pg-promise database instance (lazy-initialized)
  */
-export function initializePool(): Pool {
-  if (pool) {
-    return pool;
-  }
+export function getDb(): pgPromise.IDatabase<{}> {
+  if (db) return db;
 
-  pool = new Pool({
+  db = pgp({
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT || '5432', 10),
     database: process.env.DB_NAME || 'xmlparser',
     user: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD || '',
     max: parseInt(process.env.DB_POOL_MAX || '20', 10),
-    idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '30000', 10),
-    connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT || '2000', 10),
   });
 
-  pool.on('error', (err: Error) => {
-    console.error('Unexpected error on idle client', err);
-  });
-
-  return pool;
+  return db;
 }
 
 /**
- * Get the connection pool
+ * Close the database connection (for graceful shutdown)
  */
-export function getPool(): Pool {
-  if (!pool) {
-    return initializePool();
-  }
-  return pool;
-}
-
-/**
- * Close the connection pool (for graceful shutdown)
- */
-export async function closePool(): Promise<void> {
-  if (pool) {
-    await pool.end();
-    pool = null;
+export async function closeDb(): Promise<void> {
+  if (db) {
+    pgp.end();
+    db = null;
   }
 }
 
 /**
- * Insert a batch of toys into the database
- * Uses a transaction to ensure all-or-nothing insertion
+ * Ensure the toys table exists (idempotent)
  */
-export async function insertToysBatch(
-  client: PoolClient,
-  toys: Toy[],
-  batchId?: string
-): Promise<number> {
-  if (toys.length === 0) {
-    return 0;
-  }
-
-  // Build the INSERT query with parameterized values
-  const values: any[] = [];
-  const placeholders: string[] = [];
-  let paramIndex = 1;
-
-  for (const toy of toys) {
-    const toyJson = JSON.stringify(toy);
-    placeholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`);
-    values.push(batchId || null, toyJson, new Date());
-    paramIndex += 3;
-  }
-
-  const query = `
-    INSERT INTO toys (batch_id, data, created_at)
-    VALUES ${placeholders.join(', ')}
-  `;
-
-  const result = await client.query(query, values);
-  return result.rowCount || 0;
-}
-
-/**
- * Create the toys table if it doesn't exist
- */
-export async function ensureTableExists(client: PoolClient): Promise<void> {
-  const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS toys (
-      id SERIAL PRIMARY KEY,
-      batch_id VARCHAR(255),
+export async function ensureTableExists(): Promise<void> {
+  const database = getDb();
+  await database.none(`
+    CREATE TABLE IF NOT EXISTS public.toys (
+      id INTEGER PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+      name TEXT NOT NULL,
+      uuid TEXT NOT NULL,
       data JSONB NOT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT toys_uuid_unique UNIQUE (uuid)
     )
-  `;
-
-  await client.query(createTableQuery);
-
-  // Create indexes if they don't exist
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS idx_batch_id ON toys(batch_id)
-  `);
-  
-  await client.query(`
-    CREATE INDEX IF NOT EXISTS idx_created_at ON toys(created_at)
   `);
 }
 
 /**
- * Get a client from the pool and ensure table exists
+ * Upsert a batch of toys using pgp.helpers.
+ * On uuid conflict, updates name, data, and created_at.
  */
-export async function getClient(): Promise<PoolClient> {
-  const pool = getPool();
-  const client = await pool.connect();
-  
-  try {
-    await ensureTableExists(client);
-  } catch (error) {
-    client.release();
-    throw error;
-  }
-  
-  return client;
+export async function upsertToysBatch(toys: Toy[]): Promise<number> {
+  if (toys.length === 0) return 0;
+
+  const database = getDb();
+
+  // Build rows for the column set
+  const rows = toys.map((toy) => ({
+    name: toy.name || '',
+    uuid: toy.uuid || '',
+    data: JSON.stringify(toy),
+  }));
+
+  const insert = pgp.helpers.insert(rows, toyColumns);
+  const onConflict =
+    ' ON CONFLICT (uuid) DO UPDATE SET ' +
+    'name = EXCLUDED.name, ' +
+    'data = EXCLUDED.data, ' +
+    'created_at = EXCLUDED.created_at';
+
+  const query = insert + onConflict;
+  const result = await database.result(query);
+  return result.rowCount;
 }

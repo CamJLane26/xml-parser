@@ -87,16 +87,25 @@ export function parseXML(stream: Readable, schema: ElementSchema): Promise<Parse
 /**
  * Parse XML file stream with memory-efficient streaming for large files (100MB-1GB+).
  * Processes elements one at a time with constant memory footprint.
+ *
+ * Supports async callbacks: if onToy returns a Promise, the stream is paused
+ * (backpressure) until the Promise resolves, preventing race conditions and
+ * ensuring sequential execution of callbacks.
  */
 export function parseXMLStream(
   stream: Readable,
   schema: ElementSchema,
-  onToy: (toy: ParsedObject) => void
+  onToy: (toy: ParsedObject) => Promise<void> | void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const parser = sax.createStream(true, { lowercase: true });
     let currentElement: ElementContext | undefined;
     let rootElement: ElementContext | undefined;
+
+    // Promise chain serializes async callbacks to prevent race conditions.
+    // Each onToy call is chained so the next one cannot fire until the
+    // previous one (and any database work it awaits) fully resolves.
+    let callbackChain: Promise<void> = Promise.resolve();
 
     parser.on('opentag', (node: sax.Tag | sax.QualifiedTag) => {
       const tagName = node.name.toLowerCase();
@@ -140,7 +149,23 @@ export function parseXMLStream(
       if (lowerTagName === schema.rootElement.toLowerCase() && rootElement) {
         const parsed = extractObject(rootElement, schema);
         if (parsed) {
-          onToy(parsed);
+          // Chain the callback to ensure sequential execution.
+          // If the callback is async (returns a Promise), pause the
+          // stream until it resolves to apply backpressure.
+          callbackChain = callbackChain
+            .then(() => {
+              const result = onToy(parsed);
+              if (result && typeof (result as any).then === 'function') {
+                stream.pause();
+                return (result as Promise<void>).then(() => {
+                  stream.resume();
+                });
+              }
+            })
+            .catch((err) => {
+              reject(err);
+              stream.destroy();
+            });
         }
         clearElementTree(rootElement);
         rootElement = undefined;
@@ -162,7 +187,8 @@ export function parseXMLStream(
     });
 
     parser.on('end', () => {
-      resolve();
+      // Wait for all chained callbacks to complete before resolving
+      callbackChain.then(resolve).catch(reject);
     });
 
     stream.pipe(parser);

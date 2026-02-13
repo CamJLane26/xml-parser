@@ -25,6 +25,7 @@ export interface ToyComments {
 }
 
 export interface Toy {
+  uuid?: string;
   name?: string;
   color?: string;
   manufacturer?: ToyManufacturer;

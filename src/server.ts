@@ -6,7 +6,7 @@ import { toySchema } from './config/toySchema';
 import { Readable } from 'stream';
 import * as fs from 'fs';
 import * as sax from 'sax';
-import { getClient, insertToysBatch, closePool } from './db/postgres';
+import { getDb, upsertToysBatch, closeDb, ensureTableExists } from './db/postgres';
 import { Toy } from './types/toy';
 import { queue as asyncQueue, QueueObject } from 'async';
 
@@ -177,7 +177,7 @@ const jobResults = new Map<string, any>();
 const JOB_RESULT_TTL = 3600000; // Keep results for 1 hour
 
 app.get('/health', (req: Request, res: Response): void => {
-  res.json({ 
+  res.json({
     status: 'ok',
     queue: {
       length: parseQueue.length(),
@@ -297,8 +297,6 @@ app.get('/api/result/:jobId', (req: Request, res: Response): void => {
 async function processParseJob(job: ParseJob): Promise<void> {
   const { req, res, next, filePath, batchId, jobId, isApi } = job;
   let fileStream: Readable | undefined;
-  // @ts-ignore
-  let dbClient = null;
 
   console.log(`[Queue] Processing file: ${filePath}`);
   console.log(`[Parse] Starting parse with batch ID: ${batchId}`);
@@ -340,7 +338,7 @@ async function processParseJob(job: ParseJob): Promise<void> {
     if (documentHeader.date != null || documentHeader.author != null) {
       console.log(`[Upload] Document header: date=${documentHeader.date ?? '(none)'}, author=${documentHeader.author ?? '(none)'}`);
     }
-    
+
     // Create a fresh stream for parsing (the counting function may have consumed the original stream)
     fileStream = fs.createReadStream(filePath);
     if (!fileStream) {
@@ -367,11 +365,10 @@ async function processParseJob(job: ParseJob): Promise<void> {
       updateJobStatus({ status: 'processing', totalRecords: firstLevelToyCount });
     }
 
-    // Get database client and start transaction (if database is enabled)
+    // Ensure table exists (if database is enabled)
     if (USE_DATABASE) {
       try {
-        dbClient = await getClient();
-        await dbClient.query('BEGIN');
+        await ensureTableExists();
       } catch (dbError) {
         console.warn('[Parse] Database connection failed, continuing without database:', dbError);
         // Continue without database for local testing
@@ -396,10 +393,9 @@ async function processParseJob(job: ParseJob): Promise<void> {
       // Safety check: prevent batch from growing too large
       if (batch.length >= MAX_BATCH_SIZE) {
         console.warn(`[Parse] Batch size exceeded ${MAX_BATCH_SIZE}, forcing insert to prevent memory issues`);
-        // @ts-ignore
-        if (USE_DATABASE && dbClient) {
+        if (USE_DATABASE) {
           try {
-            await insertToysBatch(dbClient, batch, batchId);
+            await upsertToysBatch(batch);
             batch = [];
             lastBatchInsertTime = Date.now();
           } catch (dbError) {
@@ -412,7 +408,7 @@ async function processParseJob(job: ParseJob): Promise<void> {
           batch = [];
         }
       }
-      
+
       batch.push(toyWithHeader);
 
       // Collect sample toys
@@ -425,18 +421,17 @@ async function processParseJob(job: ParseJob): Promise<void> {
       const timeSinceLastInsert = Date.now() - lastBatchInsertTime;
       const shouldFlushByTime = batch.length > 0 && timeSinceLastInsert >= BATCH_FLUSH_INTERVAL_MS;
 
-      // Insert batch when it reaches the batch size or time limit (if database is enabled)
-      // @ts-ignore
-      if (USE_DATABASE && dbClient && (batch.length >= BATCH_SIZE || shouldFlushByTime)) {
+      // Upsert batch when it reaches the batch size or time limit (if database is enabled)
+      if (USE_DATABASE && (batch.length >= BATCH_SIZE || shouldFlushByTime)) {
         try {
-          await insertToysBatch(dbClient, batch, batchId);
+          await upsertToysBatch(batch);
           batch = [];
           lastBatchInsertTime = Date.now();
         } catch (dbError) {
-          console.error('[Parse] Database insert error:', dbError);
+          console.error('[Parse] Database upsert error:', dbError);
           // Always clear batch on error to prevent memory accumulation
           batch = [];
-          // Continue parsing even if database insert fails
+          // Continue parsing even if database upsert fails
         }
       }
 
@@ -466,46 +461,35 @@ async function processParseJob(job: ParseJob): Promise<void> {
       }
     });
 
-    // Insert remaining toys in batch (if database is enabled)
-    if (USE_DATABASE && dbClient && batch.length > 0) {
+    // Upsert remaining toys in batch (if database is enabled)
+    if (USE_DATABASE && batch.length > 0) {
       try {
-        await insertToysBatch(dbClient, batch, batchId);
+        await upsertToysBatch(batch);
       } catch (dbError) {
-        console.error('[Parse] Database insert error:', dbError);
+        console.error('[Parse] Database upsert error:', dbError);
       }
     }
 
-    // Commit transaction (if database is enabled)
-    if (USE_DATABASE && dbClient) {
-      try {
-        await dbClient.query('COMMIT');
-        console.log(`[Parse] Successfully inserted ${toyCount.toLocaleString()} toys into database`);
-      } catch (dbError) {
-        console.error('[Parse] Database commit error:', dbError);
-        try {
-          await dbClient.query('ROLLBACK');
-        } catch (rollbackError) {
-          console.error('[Parse] Error during rollback:', rollbackError);
-        }
-      }
+    if (USE_DATABASE) {
+      console.log(`[Parse] Successfully upserted ${toyCount.toLocaleString()} toys into database`);
     } else {
       console.log(`[Parse] Parsed ${toyCount.toLocaleString()} toys (database disabled)`);
     }
 
     // Send final progress and result
     sendProgress(100, toyCount, firstLevelToyCount);
-    
+
     const finalResult = {
       done: true,
       count: toyCount,
       sample: sampleToys
     };
-    
+
     if (res) {
       res.write(`data: ${JSON.stringify(finalResult)}\n\n`);
       res.end();
     }
-    
+
     if (isApi) {
       updateJobStatus({
         status: 'completed',
@@ -515,25 +499,17 @@ async function processParseJob(job: ParseJob): Promise<void> {
       });
     }
   } catch (error) {
-    // Rollback transaction on error (if database is enabled)
-    if (USE_DATABASE && dbClient) {
-      try {
-        await dbClient.query('ROLLBACK');
-      } catch (rollbackError) {
-        console.error('[Parse] Error during rollback:', rollbackError);
-      }
-    }
-    
+
     // Send error via SSE before ending
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error('[Parse] Error:', errorMessage);
     console.error('[Parse] Parsing failed - cleaning up temporary file');
-    
+
     if (res) {
       res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
       res.end();
     }
-    
+
     if (isApi) {
       updateJobStatus({
         status: 'failed',
@@ -541,14 +517,9 @@ async function processParseJob(job: ParseJob): Promise<void> {
         failedAt: new Date().toISOString(),
       });
     }
-    
+
     if (next) next(error);
   } finally {
-    // Release database client
-    if (dbClient) {
-      dbClient.release();
-    }
-    
     // Clean up temporary file (always executes, even on error)
     cleanupFile();
   }
@@ -571,8 +542,8 @@ app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: N
   // Send queue position info
   const queuePosition = parseQueue.length() + (parseQueue.running() > 0 ? 1 : 0);
   if (queuePosition > 1) {
-    res.write(`data: ${JSON.stringify({ 
-      queued: true, 
+    res.write(`data: ${JSON.stringify({
+      queued: true,
       position: queuePosition,
       message: `In queue. Position: ${queuePosition}. Processing will start soon...`
     })}\n\n`);
@@ -598,7 +569,7 @@ process.on('uncaughtException', async (err: Error) => {
   console.error('UNCAUGHT EXCEPTION! Shutting down...');
   console.error(err.name, err.message);
   console.error(err.stack);
-  
+
   // Attempt cleanup before crash
   console.log('[Emergency] Attempting to clean up storage directory...');
   try {
@@ -606,10 +577,10 @@ process.on('uncaughtException', async (err: Error) => {
   } catch (cleanupErr) {
     console.error('[Emergency] Cleanup failed:', cleanupErr);
   }
-  
+
   if (USE_DATABASE) {
     try {
-      await closePool();
+      await closeDb();
     } catch (poolErr) {
       console.error('[Emergency] Pool close failed:', poolErr);
     }
@@ -621,10 +592,10 @@ process.on('uncaughtException', async (err: Error) => {
 process.on('unhandledRejection', async (reason: any) => {
   console.error('UNHANDLED REJECTION! Shutting down...');
   console.error(reason);
-  
+
   if (USE_DATABASE) {
     try {
-      await closePool();
+      await closeDb();
     } catch (poolErr) {
       console.error('[Emergency] Pool close failed:', poolErr);
     }
@@ -637,13 +608,13 @@ process.on('uncaughtException', async (err: Error) => {
   console.error('UNCAUGHT EXCEPTION! Shutting down...');
   console.error(err.name, err.message);
   console.error(err.stack);
-  
+
   // Clean up storage directory before exiting
   console.log('[Emergency] Cleaning up storage directory...');
   cleanupOldStorageFiles();
-  
+
   if (USE_DATABASE) {
-    await closePool();
+    await closeDb();
   }
   process.exit(1);
 });
@@ -652,9 +623,9 @@ process.on('uncaughtException', async (err: Error) => {
 process.on('unhandledRejection', async (reason: any) => {
   console.error('UNHANDLED REJECTION! Shutting down...');
   console.error(reason);
-  
+
   if (USE_DATABASE) {
-    await closePool();
+    await closeDb();
   }
   process.exit(1);
 });
@@ -663,7 +634,7 @@ process.on('unhandledRejection', async (reason: any) => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, closing database pool...');
   if (USE_DATABASE) {
-    await closePool();
+    await closeDb();
   }
   process.exit(0);
 });
@@ -671,7 +642,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('SIGINT received, closing database pool...');
   if (USE_DATABASE) {
-    await closePool();
+    await closeDb();
   }
   process.exit(0);
 });

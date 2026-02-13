@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 const colors = ['Red', 'Blue', 'Green', 'Yellow', 'Orange', 'Purple', 'Pink', 'Black', 'White', 'Brown'];
 const toyNames = ['Brick', 'Ball', 'Car', 'Doll', 'Train', 'Plane', 'Robot', 'Teddy Bear', 'Puzzle', 'Blocks'];
@@ -37,6 +38,7 @@ function generateRandomToy(): string {
     </manufacturer>`;
 
   return `  <toy>
+    <uuid>${crypto.randomUUID()}</uuid>
     <name>${escapeXml(name)}</name>
     <color>${escapeXml(color)}</color>
 ${manufacturerXml}
@@ -45,13 +47,13 @@ ${storeElements}  </toy>`;
 
 function generateXmlFile(numToys: number, outputPath: string): void {
   let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<toys>\n';
-  
+
   for (let i = 0; i < numToys; i++) {
     xml += generateRandomToy() + '\n';
   }
-  
+
   xml += '</toys>';
-  
+
   fs.writeFileSync(outputPath, xml, 'utf-8');
   console.log(`Generated XML file with ${numToys} toys at: ${outputPath}`);
 }

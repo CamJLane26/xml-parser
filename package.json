@@ -26,7 +26,7 @@
     "async": "^3.2.6",
     "express": "4.21.2",
     "multer": "^1.4.5-lts.1",
-    "pg": "^8.11.3",
+    "pg-promise": "^12.6.1",
     "sax": "^1.3.0"
   },
   "devDependencies": {
@@ -34,7 +34,6 @@
     "@types/jest": "^29.5.12",
     "@types/multer": "^1.4.11",
     "@types/node": "^20.14.10",
-    "@types/pg": "^8.10.9",
     "@types/sax": "^1.2.7",
     "@types/supertest": "^2.0.16",
     "@types/xmldom": "^0.1.34",
