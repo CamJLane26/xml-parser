@@ -69,6 +69,7 @@ export async function upsertToysBatch(toys: Toy[]): Promise<number> {
   if (toys.length === 0) return 0;
 
   const database = getDb();
+  const delayMs = parseInt(process.env.DB_INSERT_DELAY_MS || '0', 10);
 
   // Build rows for the column set
   const rows = toys.map((toy) => ({
@@ -76,6 +77,11 @@ export async function upsertToysBatch(toys: Toy[]): Promise<number> {
     uuid: toy.uuid || '',
     data: JSON.stringify(toy),
   }));
+
+  // Log each toy being upserted
+  for (const toy of toys) {
+    console.log(`[DB] Upserting toy: name="${toy.name}", uuid="${toy.uuid}"`);
+  }
 
   const insert = pgp.helpers.insert(rows, toyColumns);
   const onConflict =
@@ -86,5 +92,13 @@ export async function upsertToysBatch(toys: Toy[]): Promise<number> {
 
   const query = insert + onConflict;
   const result = await database.result(query);
+
+  console.log(`[DB] Upserted ${result.rowCount} row(s)`);
+
+  // Optional throttle for debugging (set DB_INSERT_DELAY_MS env var)
+  if (delayMs > 0) {
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+
   return result.rowCount;
 }
