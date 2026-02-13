@@ -156,15 +156,17 @@ export function parseXMLStream(
             .then(() => {
               const result = onToy(parsed);
               if (result && typeof (result as any).then === 'function') {
-                stream.pause();
+                (stream as any).pause();
                 return (result as Promise<void>).then(() => {
-                  stream.resume();
+                  (stream as any).resume();
                 });
               }
             })
             .catch((err) => {
               reject(err);
-              stream.destroy();
+              if (typeof (stream as any).destroy === 'function') {
+                (stream as any).destroy();
+              }
             });
         }
         clearElementTree(rootElement);
