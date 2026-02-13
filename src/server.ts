@@ -176,6 +176,23 @@ function countFirstLevelToysAndHeader(filePath: string): Promise<{ firstLevelToy
 const jobResults = new Map<string, any>();
 const JOB_RESULT_TTL = 3600000; // Keep results for 1 hour
 
+/**
+ * Middleware: reject the upload before the file hits disk if the queue is busy.
+ */
+function rejectIfBusy(req: Request, res: Response, next: NextFunction): void {
+  if (!parseQueue.idle()) {
+    res.status(503).json({
+      error: 'Server is busy processing a file. Please try again later.',
+      queue: {
+        length: parseQueue.length(),
+        running: parseQueue.running(),
+      },
+    });
+    return;
+  }
+  next();
+}
+
 app.get('/health', (req: Request, res: Response): void => {
   res.json({
     status: 'ok',
@@ -194,7 +211,7 @@ app.get('/', (req: Request, res: Response): void => {
 /**
  * API: Upload and parse XML file (returns job ID for polling)
  */
-app.post('/api/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+app.post('/api/parse', rejectIfBusy, uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const filePath = (req as any).filePath as string;
   const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
   const jobId = batchId;
@@ -525,7 +542,7 @@ async function processParseJob(job: ParseJob): Promise<void> {
   }
 }
 
-app.post('/parse', uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+app.post('/parse', rejectIfBusy, uploadMiddleware, async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const filePath = (req as any).filePath as string;
   const batchId = `batch-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
 
